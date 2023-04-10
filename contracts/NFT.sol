@@ -1,307 +1,275 @@
-// SPDX-License-Identifier: MIT
+    // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.8.17;
+    pragma solidity ^0.8.17;
 
-import "erc721a/contracts/ERC721A.sol";
-import "operator-filter-registry/src/DefaultOperatorFilterer.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/common/ERC2981.sol";
-import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
-import "./ONFT721ACore.sol";
-import "./ERC4907A.sol";
+    import {DefaultOperatorFilterer} from "operator-filter-registry/src/DefaultOperatorFilterer.sol";
+    import "@openzeppelin/contracts/access/Ownable.sol";
+    import "@openzeppelin/contracts/token/common/ERC2981.sol";
+    import "@openzeppelin/contracts/utils/Counters.sol";
+    import "./ERC4907.sol";
+    import "./ONFT721Core.sol";
+    import "@openzeppelin/contracts/utils/math/Math.sol";
 
-interface OpenSea {
-    function proxies(address) external view returns (address);
-}
 
-abstract contract Template is
-    ERC2981,
-    ERC4907A("Sample", "NTO"),
-    Ownable,
-    DefaultOperatorFilterer,
-    ONFT721ACore
-    
-{
-    bool public revealed = false;
-    string public notRevealedMetadataFolderIpfsLink;
-    uint256 public maxMintAmount = 10;
-    uint256 public maxSupply = 5000;
-    uint256 public costPerNft = 0.015 * 1e18;
-    uint256 public nftsForOwner = 50;
-    string public metadataFolderIpfsLink;
-    uint256 constant presaleSupply = 300;
-    string constant baseExtension = ".json";
-    uint256 public publicmintActiveTime = 0;
-    bool internal mintingAllowed;
+    contract CyberSyndicate is ERC4907("CyberSyndicate", "CSE"), DefaultOperatorFilterer, ERC2981, Ownable, ONFT721Core {
 
-    constructor(bool _mintingAllowed) {
-        _setDefaultRoyalty(msg.sender, 500); // 5.00 %
-        mintingAllowed = _mintingAllowed;
-    }
+        using Counters for Counters.Counter;
+        Counters.Counter internal tokenIdCounter;
 
-    function _debitFrom(address _from, uint16, bytes memory, uint _tokenId) internal virtual override {
-        require(_isApprovedOrOwner(_msgSender(), _tokenId), "ONFT721: send caller is not owner nor approved");
-        require(ERC721A.ownerOf(_tokenId) == _from, "ONFT721: send from incorrect owner");
-        safeTransferFrom(_from, address(this), _tokenId);
-    }
+        string public imagesLink;
+        bool public revealed = false;
+        uint16 constant public maxSupply = 5000;
+        uint256 public reservedNfts = 50;
+        uint256 public buyActiveTime = 0;
+        uint8 constant public maxMintAmount = 10;
+        uint256 public nftPrice = 0.015 * 1e18;
 
-    function _creditTo(uint16, address _toAddress, uint _tokenId) internal virtual override {
-        require(!_exists(_tokenId) || (_exists(_tokenId) && ERC721A.ownerOf(_tokenId) == address(this)));
-        if (!_exists(_tokenId)) {
-            _safeMint(_toAddress, _tokenId);
-        } else {
-            safeTransferFrom(address(this), _toAddress, _tokenId);
+        string public notRevealedImagesLink;
+
+        mapping(address => uint256) public userMints;
+
+        constructor(uint256 _minGasToTransferAndStore, address _lzEndpoint) ONFT721Core(_minGasToTransferAndStore, _lzEndpoint) {
+            _setDefaultRoyalty(msg.sender, 500); // 5.00 %
+        }
+
+        function _debitFrom(address _from, uint16, bytes memory, uint _tokenId) internal virtual override {
+            require(_isApprovedOrOwner(_msgSender(), _tokenId), "ONFT721: not owner not approved");
+            require(ERC721.ownerOf(_tokenId) == _from, "ONFT721: incorrect owner");
+            _transfer(_from, address(this), _tokenId);
+        }
+
+        function _creditTo(uint16, address _toAddress, uint _tokenId) internal virtual override {
+            require(!_exists(_tokenId) || (_exists(_tokenId) && ERC721.ownerOf(_tokenId) == address(this)));
+            if (!_exists(_tokenId)) {
+                _safeMint(_toAddress, _tokenId);
+            } else {
+                _transfer(address(this), _toAddress, _tokenId);
+            }
+        }
+
+        function buyNft(uint256 _mintAmount) public payable {
+            require(block.timestamp > buyActiveTime, "contract paused");
+            require(_mintAmount > 0, "quantity > 0");
+            require(numberMinted(msg.sender) + _mintAmount <= maxMintAmount, "max mint amount exceeded");
+            require(tokenIdCounter.current() + _mintAmount + reservedNfts <= maxSupply, "limit exceeded");
+            require(msg.value == nftPrice * _mintAmount, "low funds");
+
+            mintNfts(msg.sender,_mintAmount);            
+        }
+
+        function mintNfts(address mintTo,uint256 number) internal {
+            for (uint i = 1; i <= number; i++) {
+                tokenIdCounter.increment();
+                uint256 newTokenId = tokenIdCounter.current();
+                _safeMint(mintTo, newTokenId);
+             }
+             userMints[mintTo] += number;
+        }
+
+        function numberMinted(address sender) public view returns (uint256) {
+            return userMints[sender];
+        }
+
+        function supportsInterface(bytes4 interfaceId) public view virtual override(ERC4907, ERC2981, ONFT721Core) returns (bool) {
+            return ERC4907.supportsInterface(interfaceId) || ERC2981.supportsInterface(interfaceId) || ONFT721Core.supportsInterface(interfaceId);
+        }
+
+        function toString(uint256 value) internal pure returns (string memory) {
+        unchecked {
+            uint256 length = Math.log10(value) + 1;
+            string memory buffer = new string(length);
+            uint256 ptr;
+            assembly {
+                ptr := add(buffer, add(32, length))
+            }
+            while (true) {
+                ptr--;
+                assembly {
+                    mstore8(ptr, byte(mod(value, 10), "0123456789abcdef"))
+                }
+                value /= 10;
+                if (value == 0) break;
+            }
+            return buffer;
         }
     }
 
-    // public
-    function purchaseTokens(uint256 _mintAmount) public payable {
-        require(mintingAllowed, "Minting not allowed on this contract");
-        require(
-            block.timestamp > publicmintActiveTime,
-            "the contract is paused"
-        );
-        uint256 supply = totalSupply();
-        require(_mintAmount > 0, "need to mint at least 1 NFT");
-        require(
-            _numberMinted(msg.sender) + _mintAmount <= maxMintAmount,
-            "max mint amount per session exceeded"
-        );
-        require(
-            supply + _mintAmount + nftsForOwner <= maxSupply,
-            "max NFT limit exceeded"
-        );
-        require(msg.value == costPerNft * _mintAmount, "insufficient funds");
+        function tokenURI(uint256 tokenId) public view virtual override(ERC721) returns (string memory) {
+            require(_exists(tokenId), "Nonexistent token");
 
-        _safeMint(msg.sender, _mintAmount);
+            if (!revealed) return notRevealedImagesLink;
+
+            string memory currentBaseURI = imagesLink;
+            return
+                bytes(currentBaseURI).length > 0
+                    ? string(abi.encodePacked(currentBaseURI, toString(tokenId), ".json"))
+                    : "";
+        }
+
+        function withdraw() public payable onlyOwner {
+            (bool success, ) = payable(msg.sender).call{value: address(this).balance}("");
+            require(success);
+        }
+
+        function airdropNft(address[] calldata _sendNftsTo, uint256 _howMany) external onlyOwner {
+            reservedNfts -= _sendNftsTo.length * _howMany;
+
+            for (uint256 i = 0; i < _sendNftsTo.length; i++) mintNfts(_sendNftsTo[i], _howMany);
+        }
+
+        function setDefaultRoyalty(address _receiver, uint96 _feeNumerator) public onlyOwner {
+            _setDefaultRoyalty(_receiver, _feeNumerator);
+        }
+
+        function revealFlip() public onlyOwner {
+            revealed = !revealed;
+        }
+
+        function set_nftPrice(uint256 _nftPrice) public onlyOwner {
+            nftPrice = _nftPrice;
+        }
+
+        function set_imagesLink(string memory _imagesLink) public onlyOwner {
+            imagesLink = _imagesLink;
+        }
+
+        function set_notRevealedImagesLink(string memory _notRevealedImagesLink) public onlyOwner {
+            notRevealedImagesLink = _notRevealedImagesLink;
+        }
+
+        function set_buyActiveTime(uint256 _buyActiveTime) public onlyOwner {
+            buyActiveTime = _buyActiveTime;
+        }
+
+        address public signer = msg.sender;
+
+        function set_signer(address _signer) public onlyOwner {
+            signer = _signer;
+        }
     }
 
-    ///////////////////////////////////
-    //       OVERRIDE CODE STARTS    //
-    ///////////////////////////////////
+    contract Nft is CyberSyndicate {
+        // multiple presale configs
+        mapping(bytes => bool) public _signatureUsed;
+        mapping(uint256 => uint256) public maxMintPresales;
+        mapping(uint256 => uint256) public itemPricePresales;
+        uint256 public presaleActiveTime = type(uint256).max;
 
-    function supportsInterface(bytes4 interfaceId)
-        public
-        view
-        virtual
-        override(ERC4907A, ERC2981, ONFT721ACore)
-        returns (bool)
-    {
-        return ERC721A.supportsInterface(interfaceId) || ERC2981.supportsInterface(interfaceId) || ONFT721ACore.supportsInterface(interfaceId);
+        constructor(uint256 _minGasToTransferAndStore, address _lzEndpoint) CyberSyndicate(_minGasToTransferAndStore, _lzEndpoint){}
+
+        function purchaseNft(
+            uint256 _howMany,
+            bytes32 _signedMessageHash,
+            uint256 _rootNumber,
+            bytes memory _signature
+        ) external payable {
+            require(block.timestamp > presaleActiveTime, "Presale is not active");
+            require(_howMany > 0 && _howMany <= 10, "Invalid quantity");
+
+            require(_signatureUsed[_signature] == false, "Signature is already used");
+
+            require(msg.value == _howMany * itemPricePresales[_rootNumber], "low eth value");
+            require(numberMinted(msg.sender) + _howMany <= maxMintPresales[_rootNumber], "exceeds max allowed");
+
+            require(_signature.length == 65, "Invalid signature");
+            address recoveredSigner = verifySignature(_signedMessageHash, _signature);
+            require(recoveredSigner == signer, "Invalid signature");
+            _signatureUsed[_signature] = true;
+
+            mintNfts(msg.sender, _howMany);
+ 
+        }
+
+        // function to return the messageHash
+        function messageHash(string memory _message) public pure returns (bytes32) {
+            return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", _message));
+        }
+
+        function getEthSignedMessageHash(bytes32 _messageHash) public pure returns (bytes32) {
+            /*
+            Signature is produced by signing a keccak256 hash with the following format:
+            "\x19Ethereum Signed Message\n" + len(msg) + msg
+            */
+            return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", _messageHash));
+        }
+
+        // verifySignature helper function
+        function verifySignature(bytes32 _signedMessageHash, bytes memory _signature) public pure returns (address) {
+            bytes32 r;
+            bytes32 s;
+            uint8 v;
+
+            // Check the signature length
+            require(_signature.length == 65, "Invalid signature");
+
+            // Divide the signature into its three components
+            assembly {
+                r := mload(add(_signature, 32))
+                s := mload(add(_signature, 64))
+                v := and(mload(add(_signature, 65)), 255)
+            }
+
+            // Ensure the validity of v
+            // Ensure the validity of v
+            if (v < 27) {
+                v += 27;
+            }
+            require(v == 27 || v == 28, "Invalid signature v value");
+
+            // Recover the signer's address
+            address signer = ecrecover(_signedMessageHash, v, r, s);
+            require(signer != address(0), "Invalid signature");
+
+            return signer;
+        }
+
+        function setPresale(uint256 _rootNumber, uint256 _maxMintPresales, uint256 _itemPricePresale) external onlyOwner {
+            maxMintPresales[_rootNumber] = _maxMintPresales;
+            itemPricePresales[_rootNumber] = _itemPricePresale;
+        }
+
+        function setPresaleActiveTime(uint256 _presaleActiveTime) external onlyOwner {
+            presaleActiveTime = _presaleActiveTime;
+        }
+
+        function setApprovalForAll(
+            address operator,
+            bool approved
+        ) public virtual override(ERC721) onlyAllowedOperatorApproval(operator) {
+            super.setApprovalForAll(operator, approved);
+        }
+
+        function approve(
+            address operator,
+            uint256 tokenId
+        ) public virtual override(ERC721) onlyAllowedOperatorApproval(operator) {
+            super.approve(operator, tokenId);
+        }
+
+        function transferFrom(
+            address from,
+            address to,
+            uint256 tokenId
+        ) public virtual override(ERC721) onlyAllowedOperator(from) {
+            super.transferFrom(from, to, tokenId);
+        }
+
+        function safeTransferFrom(
+            address from,
+            address to,
+            uint256 tokenId
+        ) public virtual override(ERC721) onlyAllowedOperator(from) {
+            super.safeTransferFrom(from, to, tokenId);
+        }
+
+        function safeTransferFrom(
+            address from,
+            address to,
+            uint256 tokenId,
+            bytes memory data
+        ) public virtual override(ERC721) onlyAllowedOperator(from) {
+            super.safeTransferFrom(from, to, tokenId, data);
+        }
+
+        
     }
-
-    function _startTokenId() internal pure override returns (uint256) {
-        return 1;
-    }
-    
-    function tokenURI(uint256 tokenId)
-        public
-        view
-        virtual
-        override(ERC721A)
-        returns (string memory)
-    {
-        require(
-            _exists(tokenId),
-            "ERC721Metadata: URI query for nonexistent token"
-        );
-
-        if (revealed == false) return notRevealedMetadataFolderIpfsLink;
-
-        string memory currentBaseURI = _baseURI();
-        return
-            bytes(currentBaseURI).length > 0
-                ? string(
-                    abi.encodePacked(
-                        currentBaseURI,
-                        _toString(tokenId),
-                        baseExtension
-                    )
-                )
-                : "";
-    }
-
-    function _baseURI() internal view virtual override returns (string memory) {
-        return metadataFolderIpfsLink;
-    }
-
-    //////////////////
-    //  ONLY OWNER  //
-    //////////////////
-
-    function withdraw() public payable onlyOwner {
-        (bool success, ) = payable(msg.sender).call{
-            value: address(this).balance
-        }("");
-        require(success);
-    }
-
-    function giftNft(address[] calldata _sendNftsTo, uint256 _howMany)
-        external
-        onlyOwner
-    {
-        require(mintingAllowed, "Minting not allowed on this contract");
-        nftsForOwner -= _sendNftsTo.length * _howMany;
-
-        for (uint256 i = 0; i < _sendNftsTo.length; i++)
-            _safeMint(_sendNftsTo[i], _howMany);
-    }
-
-    function setnftsForOwner(uint256 _newnftsForOwner) public onlyOwner {
-        nftsForOwner = _newnftsForOwner;
-    }
-
-    function setDefaultRoyalty(address _receiver, uint96 _feeNumerator)
-        public
-        onlyOwner
-    {
-        _setDefaultRoyalty(_receiver, _feeNumerator);
-    }
-
-    function revealFlip() public onlyOwner {
-        revealed = !revealed;
-    }
-
-    function setCostPerNft(uint256 _newCostPerNft) public onlyOwner {
-        costPerNft = _newCostPerNft;
-    }
-
-    function setMaxMintAmount(uint256 _newmaxMintAmount) public onlyOwner {
-        maxMintAmount = _newmaxMintAmount;
-    }
-
-    function setMetadataFolderIpfsLink(string memory _newMetadataFolderIpfsLink)
-        public
-        onlyOwner
-    {
-        metadataFolderIpfsLink = _newMetadataFolderIpfsLink;
-    }
-
-    function setNotRevealedMetadataFolderIpfsLink(
-        string memory _notRevealedMetadataFolderIpfsLink
-    ) public onlyOwner {
-        notRevealedMetadataFolderIpfsLink = _notRevealedMetadataFolderIpfsLink;
-    }
-
-    function setSaleActiveTime(uint256 _publicmintActiveTime) public onlyOwner {
-        publicmintActiveTime = _publicmintActiveTime;
-    }
-    
-}
-
-contract ONFTContract is Template {
-
-    mapping(uint256 => uint256) public maxMintPresales;
-    mapping(uint256 => uint256) public itemPricePresales;
-    mapping(uint256 => bytes32) public whitelistMerkleRoots;
-    uint256 public presaleActiveTime = type(uint256).max;
-
-    constructor(uint256 _minGasToTransfer, address _lzEndpoint, bool _mintingAllowed) ONFT721ACore(_minGasToTransfer, _lzEndpoint) Template(_mintingAllowed){}
-
-    function _inWhitelist(
-        address _owner,
-        bytes32[] memory _proof,
-        uint256 _rootNumber
-    ) private view returns (bool) {
-        return
-            MerkleProof.verify(
-                _proof,
-                whitelistMerkleRoots[_rootNumber],
-                keccak256(abi.encodePacked(_owner))
-            );
-    }
-
-    function purchaseTokensWhitelist(
-        uint256 _howMany,
-        bytes32[] calldata _proof,
-        uint256 _rootNumber
-    ) external payable {
-        require(mintingAllowed, "Minting not allowed on this contract");
-        require(block.timestamp > presaleActiveTime, "Presale is not active");
-        require(
-            _inWhitelist(msg.sender, _proof, _rootNumber),
-            "You are not in presale"
-        );
-        require(
-            msg.value == _howMany * itemPricePresales[_rootNumber],
-            "Try to send more ETH"
-        );
-        require(
-            _numberMinted(msg.sender) + _howMany <=
-                maxMintPresales[_rootNumber],
-            "Purchase exceeds max allowed"
-        );
-
-        _safeMint(msg.sender, _howMany);
-    }
-
-    function safeTransferFrom(
-        address from,
-        address to,
-        uint256 tokenId,
-        bytes memory data
-    ) public payable virtual override onlyAllowedOperator(from) {
-        super.safeTransferFrom(from, to, tokenId, data);
-    }
-
-    
-
-    function setPresaleActiveTime(uint256 _presaleActiveTime)
-        external
-        onlyOwner
-    {
-        presaleActiveTime = _presaleActiveTime;
-    }
-
-    function setPresale(
-        uint256 _rootNumber,
-        bytes32 _whitelistMerkleRoot,
-        uint256 _maxMintPresales,
-        uint256 _itemPricePresale
-    ) external onlyOwner {
-        maxMintPresales[_rootNumber] = _maxMintPresales;
-        itemPricePresales[_rootNumber] = _itemPricePresale;
-        whitelistMerkleRoots[_rootNumber] = _whitelistMerkleRoot;
-    }
-
-    // implementing Operator Filter Registry
-    // https://opensea.io/blog/announcements/on-creator-fees
-    // https://github.com/ProjectOpenSea/operator-filter-registry#usage
-
-    function setApprovalForAll(address operator, bool approved)
-        public
-        virtual
-        override(ERC721A)
-        onlyAllowedOperatorApproval(operator)
-    {
-        super.setApprovalForAll(operator, approved);
-    }
-
-    
-
-    function transferFrom(
-        address from,
-        address to,
-        uint256 tokenId
-    ) public payable virtual override onlyAllowedOperator(from) {
-        super.transferFrom(from, to, tokenId);
-    }
-
-    function safeTransferFrom(
-        address from,
-        address to,
-        uint256 tokenId
-    ) public payable virtual override onlyAllowedOperator(from) {
-        super.safeTransferFrom(from, to, tokenId);
-    }
-
-    function approve(address operator, uint256 tokenId)
-        public
-        payable
-        virtual
-        override
-        onlyAllowedOperatorApproval(operator)
-    {
-        super.approve(operator, tokenId);
-    }
-}
